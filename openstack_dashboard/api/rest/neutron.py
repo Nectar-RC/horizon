@@ -43,9 +43,12 @@ class Networks(generic.View):
         # so it is no problem to pass include_pre_auto_allocate=True always.
         # We need to revisit the logic if we use this method for
         # other operations other than server create.
+        # Nectar: the trunk dialogs also use this, only to label ports, so
+        # offering the networks an instance may boot on suits them too.
         result = api.neutron.network_list_for_tenant(
             request, tenant_id,
-            include_pre_auto_allocate=True, shared=False)
+            include_pre_auto_allocate=True,
+            purpose=api.neutron.PURPOSE_BOOT)
         return{'items': [n.to_dict() for n in result]}
 
     @rest_utils.ajax(data_required=True)
@@ -90,8 +93,15 @@ class Subnets(generic.View):
         The listing result is an object with property "items".  Each item is
         a subnet.
 
+        Nectar: without a filter this lists the subnets of the networks
+        the project may create ports on, see subnet_list_for_tenant().
         """
-        result = api.neutron.subnet_list(request, **request.GET.dict())
+        params = dict(request.GET.items())
+        if params:
+            result = api.neutron.subnet_list(request, **params)
+        else:
+            result = api.neutron.subnet_list_for_tenant(
+                request, request.user.tenant_id)
         return{'items': [n.to_dict() for n in result]}
 
     @rest_utils.ajax(data_required=True)

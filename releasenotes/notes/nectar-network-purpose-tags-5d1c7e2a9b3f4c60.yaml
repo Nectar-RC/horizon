@@ -1,0 +1,29 @@
+---
+features:
+  - |
+    Nectar network visibility is now driven by three settings handled in
+    one place, ``openstack_dashboard.api.neutron``. ``NECTAR_FLOATING_NETWORK_TAG``
+    marks external networks usable for floating IPs and router gateways,
+    the new ``NECTAR_BOOTABLE_NETWORK_TAG`` marks shared networks (for
+    example a provider network RBAC-shared to one project) that a project
+    may boot or attach an instance on, and the new
+    ``NECTAR_CLASSIC_NETWORK_ID`` replaces the hard-coded id of the classic
+    placeholder network. Shared networks without a tag are never offered.
+    ``network_list_for_tenant()`` takes a ``purpose`` argument,
+    ``floating_network_list()`` returns the floating networks and
+    ``subnet_list_for_tenant()`` the subnets of the networks a project may
+    boot on. The unfiltered subnets REST listing, which plugin wizards
+    such as octavia-dashboard use, is served by the latter.
+upgrade:
+  - |
+    Set ``NECTAR_CLASSIC_NETWORK_ID`` (previously always
+    ``00000000-0000-0000-0000-000000000000``) and
+    ``NECTAR_BOOTABLE_NETWORK_TAG`` in ``local_settings.py`` and tag every
+    shared network users may boot on. Without the classic setting the
+    classic network is no longer offered.
+fixes:
+  - |
+    A provider network RBAC-shared to a project can now be booted on when
+    it carries the bootable tag. Listing networks no longer fetches every
+    visible network a second time to find the classic network, and
+    subnets of shared and floating networks are shown again.

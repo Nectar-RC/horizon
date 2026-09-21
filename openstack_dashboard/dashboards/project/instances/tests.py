@@ -2806,16 +2806,16 @@ class InstanceTests2(InstanceTestBase, InstanceTableTestMixin):
 
 class NetworkFieldDataTests(helpers.APITestCase):
     @helpers.create_mocks({api.neutron: ('network_list_for_tenant',)})
-    def test_for_launch_excludes_shared_networks(self):
-        # Nectarism: shared networks are provider and floating networks
-        # here, and neutron returns them ahead of the default network.
+    def test_for_launch_asks_for_bootable_networks(self):
+        # Nectar: the API layer decides which shared networks may be
+        # booted on, and puts the classic network first.
         self.mock_network_list_for_tenant.return_value = []
 
         instance_utils.network_field_data(self.request, for_launch=True)
 
         self.mock_network_list_for_tenant.assert_called_once_with(
             self.request, self.request.user.tenant_id,
-            include_pre_auto_allocate=True, shared=False)
+            include_pre_auto_allocate=True, purpose=api.neutron.PURPOSE_BOOT)
 
     @helpers.create_mocks({api.neutron: ('network_list_for_tenant',)})
     def test_without_for_launch_leaves_shared_alone(self):

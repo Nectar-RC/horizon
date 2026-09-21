@@ -224,7 +224,13 @@ CSRF_COOKIE_AGE = None
 
 COMPRESS_OFFLINE_CONTEXT = 'horizon.themes.offline_context'
 
+# Nectar network classification, see openstack_dashboard/api/neutron.py.
+# Tag on external networks usable for floating IPs and router gateways.
 NECTAR_FLOATING_NETWORK_TAG = None
+# Tag on shared networks a project user may boot or attach an instance on.
+NECTAR_BOOTABLE_NETWORK_TAG = None
+# ID of the classic placeholder network offered first when booting.
+NECTAR_CLASSIC_NETWORK_ID = None
 
 # Notice all customizable configurations should be above this line
 XSTATIC_MODULES = settings_utils.BASE_XSTATIC_MODULES

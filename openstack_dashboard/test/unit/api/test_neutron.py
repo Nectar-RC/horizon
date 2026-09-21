@@ -2404,6 +2404,263 @@ class NeutronApiFloatingIpPortForwardingTest(test.APIMockTestCase):
             'fip', pfw_id)
 
 
+CLASSIC_NETWORK_ID = '00000000-0000-0000-0000-000000000000'
+
+
+@override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating',
+                   NECTAR_BOOTABLE_NETWORK_TAG='nectar:bootable',
+                   NECTAR_CLASSIC_NETWORK_ID=CLASSIC_NETWORK_ID)
+class NectarNetworkListTests(test.APIMockTestCase):
+    """Nectar: network listings are driven by the NECTAR_* settings."""
+
+    tenant_id = '1'
+
+    def setUp(self):
+        super().setUp()
+        all_networks = self.networks.list()
+        self.nets_by_id = {n.id: n for n in all_networks}
+        self.classic_net = api.neutron.Network({
+            'id': CLASSIC_NETWORK_ID,
+            'name': 'Classic Provider',
+            'tenant_id': 'admin',
+            'shared': True, 'is_shared': True,
+            'router:external': False, 'is_router_external': False,
+            'subnet_ids': [], 'subnets': [],
+        })
+        self.shared_nets = [n for n in all_networks if n['is_shared']]
+        self.project_nets = [n for n in all_networks
+                             if (n['tenant_id'] == self.tenant_id and
+                                 not n['is_shared'])]
+        self.external_nets = [n for n in all_networks
+                              if (n['is_router_external'] and
+                                  not n['is_shared'])]
+        self.network_list_calls = []
+
+    def _network_list(self, request, **kwargs):
+        self.network_list_calls.append(kwargs)
+        if kwargs.get('router:external') is True:
+            return list(self.external_nets)
+        if kwargs.get('shared') is True:
+            return list(self.shared_nets)
+        return list(self.project_nets)
+
+    def _network_get(self, request, network_id, **kwargs):
+        if network_id == CLASSIC_NETWORK_ID:
+            return self.classic_net
+        return self.nets_by_id[network_id]
+
+    def _setup_mocks(self):
+        self.mock_network_list.side_effect = self._network_list
+        self.mock_network_get.side_effect = self._network_get
+
+    @staticmethod
+    def _ids(networks):
+        return [n.id for n in networks]
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_panel_listing_offers_tagged_shared_and_floating(self):
+        self._setup_mocks()
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, include_external=True)
+
+        self.mock_network_get.assert_called_once_with(
+            test.IsHttpRequest(), CLASSIC_NETWORK_ID)
+        self.assertEqual([
+            {'single_page': False, 'shared': True,
+             'tags-any': 'nectar:floating,nectar:bootable'},
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+            {'single_page': False, 'shared': False,
+             'router:external': True, 'tags-any': 'nectar:floating'},
+        ], self.network_list_calls)
+        foreign_external = [n for n in self.external_nets
+                            if n['tenant_id'] != self.tenant_id]
+        self.assertEqual(
+            self._ids([self.classic_net] + self.shared_nets +
+                      self.project_nets + foreign_external),
+            self._ids(ret))
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_boot_offers_classic_then_bootable_shared(self):
+        self._setup_mocks()
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, include_pre_auto_allocate=True,
+            purpose=api.neutron.PURPOSE_BOOT)
+
+        self.mock_network_get.assert_called_once_with(
+            test.IsHttpRequest(), CLASSIC_NETWORK_ID)
+        self.assertEqual([
+            {'single_page': False, 'shared': True,
+             'tags-any': 'nectar:bootable'},
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+        ], self.network_list_calls)
+        self.assertEqual(
+            self._ids([self.classic_net] + self.shared_nets +
+                      self.project_nets),
+            self._ids(ret))
+        self.assertNotIn(api.neutron.AUTO_ALLOCATE_ID, self._ids(ret))
+
+    @override_settings(NECTAR_BOOTABLE_NETWORK_TAG=None)
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_boot_without_bootable_tag_offers_no_shared_networks(self):
+        self._setup_mocks()
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, purpose=api.neutron.PURPOSE_BOOT)
+
+        self.assertEqual([
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+        ], self.network_list_calls)
+        self.assertEqual(self._ids([self.classic_net] + self.project_nets),
+                         self._ids(ret))
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_router_offers_project_networks_only(self):
+        self._setup_mocks()
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, purpose=api.neutron.PURPOSE_ROUTER)
+
+        self.mock_network_get.assert_not_called()
+        self.assertEqual([
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+        ], self.network_list_calls)
+        self.assertEqual(self._ids(self.project_nets), self._ids(ret))
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_classic_respects_shared_and_external_filters(self):
+        self._setup_mocks()
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, shared=False)
+        self.assertNotIn(CLASSIC_NETWORK_ID, self._ids(ret))
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, include_external=True,
+            **{'router:external': True})
+        self.assertNotIn(CLASSIC_NETWORK_ID, self._ids(ret))
+
+        self.mock_network_get.assert_not_called()
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_classic_leads_first_page_and_counts_against_limit(self):
+        self._setup_mocks()
+        template = self.shared_nets[0].to_dict()
+        self.shared_nets = [
+            api.neutron.Network(dict(template, id='shared-%02d' % i))
+            for i in range(21)]
+        page_data = {'marker_id': None, 'sort_dir': 'desc'}
+
+        ret, has_more, has_prev = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, include_external=True,
+            page_data=page_data)
+
+        self.assertEqual(20, len(ret))
+        self.assertEqual(CLASSIC_NETWORK_ID, ret[0].id)
+        self.assertEqual(['shared-%02d' % i for i in range(19)],
+                         self._ids(ret[1:]))
+        self.assertTrue(has_more)
+        self.assertFalse(has_prev)
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_classic_not_added_to_later_pages(self):
+        self._setup_mocks()
+        marker = self.project_nets[0]
+        page_data = {'marker_id': marker.id, 'sort_dir': 'desc'}
+
+        ret, _has_more, _has_prev = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, include_external=True,
+            page_data=page_data)
+
+        self.mock_network_get.assert_called_once_with(
+            test.IsHttpRequest(), marker.id)
+        self.assertNotIn(CLASSIC_NETWORK_ID, self._ids(ret))
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_classic_lookup_failure_is_ignored(self):
+        self._setup_mocks()
+        self.mock_network_get.side_effect = Exception('neutron down')
+
+        ret = api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, purpose=api.neutron.PURPOSE_BOOT)
+
+        self.assertNotIn(CLASSIC_NETWORK_ID, self._ids(ret))
+        self.assertEqual(2, len(self.network_list_calls))
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG=None,
+                       NECTAR_BOOTABLE_NETWORK_TAG=None,
+                       NECTAR_CLASSIC_NETWORK_ID=None)
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_unset_settings_behave_like_upstream(self):
+        self._setup_mocks()
+
+        api.neutron.network_list_for_tenant(
+            self.request, self.tenant_id, purpose=api.neutron.PURPOSE_BOOT)
+
+        self.mock_network_get.assert_not_called()
+        self.assertEqual([
+            {'single_page': False, 'shared': True},
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+        ], self.network_list_calls)
+
+    @test.create_mocks({api.neutron: ('network_list',)})
+    def test_floating_network_list_filters_by_tag(self):
+        self.mock_network_list.return_value = self.external_nets
+
+        ret = api.neutron.floating_network_list(self.request)
+
+        self.mock_network_list.assert_called_once_with(
+            test.IsHttpRequest(),
+            **{'router:external': True, 'tags-any': 'nectar:floating'})
+        self.assertEqual(self.external_nets, ret)
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG=None)
+    @test.create_mocks({api.neutron: ('network_list',)})
+    def test_floating_network_list_without_tag(self):
+        self.mock_network_list.return_value = self.external_nets
+
+        api.neutron.floating_network_list(self.request)
+
+        self.mock_network_list.assert_called_once_with(
+            test.IsHttpRequest(), **{'router:external': True})
+
+    @test.create_mocks({api.neutron: ('network_list', 'network_get')})
+    def test_subnet_list_for_tenant_uses_bootable_networks(self):
+        self._setup_mocks()
+
+        ret = api.neutron.subnet_list_for_tenant(self.request, self.tenant_id)
+
+        self.assertEqual([
+            {'single_page': False, 'shared': True,
+             'tags-any': 'nectar:bootable'},
+            {'single_page': False, 'shared': False,
+             'tenant_id': self.tenant_id},
+        ], self.network_list_calls)
+        expected = [subnet
+                    for network in self.shared_nets + self.project_nets
+                    for subnet in network['subnets']]
+        self.assertEqual(expected, ret)
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG=None,
+                       NECTAR_BOOTABLE_NETWORK_TAG=None,
+                       NECTAR_CLASSIC_NETWORK_ID=None)
+    @test.create_mocks({api.neutron: ('subnet_list', 'network_list')})
+    def test_subnet_list_for_tenant_upstream_when_unset(self):
+        self.mock_subnet_list.return_value = self.subnets.list()
+
+        ret = api.neutron.subnet_list_for_tenant(self.request, self.tenant_id)
+
+        self.mock_subnet_list.assert_called_once_with(test.IsHttpRequest())
+        self.mock_network_list.assert_not_called()
+        self.assertEqual(self.subnets.list(), ret)
+
+
 class NeutronApiFloatingIpTests(test.APIMockTestCase):
 
     def setUp(self):
@@ -2430,6 +2687,54 @@ class NeutronApiFloatingIpTests(test.APIMockTestCase):
             self.assertEqual([p[attr] for p in ext_nets],
                              [getattr(p, attr) for p in rets])
         self.netclient.networks.assert_called_once_with(**search_opts)
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    def test_floating_ip_pools_list_nectar_tag(self):
+        ext_nets = [n for n in self.api_networks_sdk
+                    if n['is_router_external']]
+        self.netclient.networks.return_value = ext_nets
+
+        rets = api.neutron.floating_ip_pools_list(self.request)
+
+        self.assertEqual([p['id'] for p in ext_nets], [p.id for p in rets])
+        self.netclient.networks.assert_called_once_with(
+            **{'router:external': True, 'tags-any': 'nectar:floating'})
+
+    @override_settings(
+        OPENSTACK_NEUTRON_NETWORK={'enable_fip_topology_check': True},
+        NECTAR_FLOATING_NETWORK_TAG='nectar:floating',
+        NECTAR_BOOTABLE_NETWORK_TAG='nectar:bootable')
+    def test_reachable_subnets_nectar_adds_bootable_shared_subnets(self):
+        shared_nets = [n for n in self.api_networks_sdk if n['shared']]
+        shared_subnet_ids = [s for n in shared_nets for s in n['subnet_ids']]
+        self.netclient.networks.side_effect = [[], shared_nets]
+        self.netclient.routers.return_value = []
+        self.netclient.subnets.return_value = [
+            s for s in self.api_subnets_sdk if s['id'] in shared_subnet_ids]
+
+        manager = api.neutron.FloatingIpManager(self.request)
+        reachable = manager._get_reachable_subnets([])
+
+        self.assertEqual(set(shared_subnet_ids), reachable)
+        self.netclient.networks.assert_has_calls([
+            mock.call(**{'router:external': True,
+                         'tags-any': 'nectar:floating'}),
+            mock.call(is_shared=True, **{'tags-any': 'nectar:bootable'}),
+        ])
+
+    @override_settings(
+        OPENSTACK_NEUTRON_NETWORK={'enable_fip_topology_check': True},
+        NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    def test_reachable_subnets_nectar_without_bootable_tag(self):
+        self.netclient.networks.return_value = []
+        self.netclient.routers.return_value = []
+
+        manager = api.neutron.FloatingIpManager(self.request)
+        reachable = manager._get_reachable_subnets([])
+
+        self.assertEqual(set(), reachable)
+        self.netclient.networks.assert_called_once_with(
+            **{'router:external': True, 'tags-any': 'nectar:floating'})
 
     def test_floating_ip_list(self):
         fips = self.api_floating_ips_sdk

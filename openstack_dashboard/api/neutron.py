@@ -165,6 +165,71 @@ class PreAutoAllocateNetwork(Network):
         super().__init__(auto_allocated_network)
 
 
+# Nectar: which networks a project user is offered depends on what they are
+# about to do with them. Operators classify networks with tags:
+#
+# * NECTAR_FLOATING_NETWORK_TAG marks external networks usable for floating
+#   IPs and router gateways.
+# * NECTAR_BOOTABLE_NETWORK_TAG marks shared networks (usually provider
+#   networks RBAC-shared to a project) that a user may boot or attach on.
+# * NECTAR_CLASSIC_NETWORK_ID is the placeholder network nova swaps for a
+#   real provider network. It is offered first when booting or attaching.
+#
+# Shared networks without any of these tags (the provider networks nova
+# substitutes for the classic one) are never offered. With none of the
+# settings configured every listing behaves exactly like upstream.
+
+# Networks the user may put an instance port on: launch instance, attach
+# interface, port pickers and floating IP targets.
+PURPOSE_BOOT = 'boot'
+# Networks the user may attach a router interface to.
+PURPOSE_ROUTER = 'router'
+
+
+def nectar_tag(kind):
+    """Return the configured Nectar network tag for ``kind`` or None.
+
+    :param kind: 'floating' or 'bootable'
+    """
+    return getattr(settings, 'NECTAR_%s_NETWORK_TAG' % kind.upper(), None)
+
+
+def nectar_classic_network_id():
+    return getattr(settings, 'NECTAR_CLASSIC_NETWORK_ID', None)
+
+
+def _nectar_shared_tags(purpose):
+    """Tags a shared network needs to be offered for ``purpose``.
+
+    :returns: None when Nectar tagging is not configured (list shared
+        networks as upstream does), an empty list when no shared network
+        may be offered, otherwise the list of accepted tags.
+    """
+    floating = nectar_tag('floating')
+    bootable = nectar_tag('bootable')
+    if not floating and not bootable:
+        return None
+    if purpose == PURPOSE_ROUTER:
+        return []
+    if purpose == PURPOSE_BOOT:
+        return [bootable] if bootable else []
+    return [tag for tag in (floating, bootable) if tag]
+
+
+def _tags_any_param(tags):
+    if not tags:
+        return {}
+    return {'tags-any': ','.join(tags)}
+
+
+def _floating_network_params(**params):
+    params['router:external'] = True
+    floating = nectar_tag('floating')
+    if floating:
+        params.update(_tags_any_param([floating]))
+    return params
+
+
 class Trunk(NeutronAPIDictWrapper):
     """Wrapper for neutron trunks."""
 
@@ -691,10 +756,7 @@ class FloatingIpManager(object):
 
         :returns: List of FloatingIpPool objects
         """
-        search_opts = {'router:external': True}
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            search_opts['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
-
+        search_opts = _floating_network_params()
         return [FloatingIpPool(pool) for pool
                 in self.net_client.networks(**search_opts)]
 
@@ -839,11 +901,13 @@ class FloatingIpManager(object):
                                 if p.device_id in gw_routers)
         # we have to include any shared subnets as well because we may not
         # have permission to see the router interface to infer connectivity
-        search_opts = {'is_shared': True}
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            search_opts['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
-
-        shared = set(s.id for n in network_list(self.request, **search_opts)
+        # Nectar: only shared networks a user can have a port on qualify,
+        # ports directly on a floating network are never targets.
+        tags = _nectar_shared_tags(PURPOSE_BOOT)
+        if tags is not None and not tags:
+            return reachable_subnets
+        shared = set(s.id for n in network_list(self.request, is_shared=True,
+                                                **_tags_any_param(tags))
                      for s in n['subnets'])
         return reachable_subnets | shared
 
@@ -1251,6 +1315,16 @@ def network_list(request, single_page=False, **params):
     return [Network(n) for n in nets_with_subnet]
 
 
+@profiler.trace
+def floating_network_list(request, **params):
+    """Return the external networks floating IPs and router gateways may use.
+
+    Nectar: restricted to networks tagged NECTAR_FLOATING_NETWORK_TAG when
+    that is configured, so provider networks are never offered.
+    """
+    return network_list(request, **_floating_network_params(**params))
+
+
 def _is_auto_allocated_network_supported(request):
     try:
         neutron_auto_supported = is_service_enabled(
@@ -1343,23 +1417,27 @@ def _query_external_nets(request, include_external, page_data, **params):
             page_data.get('marker_type') in (None, 'ext')):
 
         # Grab only all external non-shared networks
-        params['router:external'] = True
-        params['shared'] = False
-
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            params['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
+        # Nectar: only floating networks, never the provider networks
+        params.update(_floating_network_params(shared=False))
 
         return _perform_net_query(request, {}, page_data, 'ext', **params)
 
     return []
 
 
-def _query_shared_nets(request, page_data, **params):
+def _query_shared_nets(request, page_data, purpose=None, **params):
 
     # If the shared filter is set to False we don't need to perform this query
     # We are either paginating shared nets or not pending more data
     if (page_data['filter_shared'] is not False and
             page_data.get('marker_type') in (None, 'shr')):
+
+        # Nectar: shared networks are offered by tag, depending on purpose
+        tags = _nectar_shared_tags(purpose)
+        if tags is not None and not tags:
+            if page_data.get('marker_type') == 'shr':
+                page_data['marker_type'] = None
+            return []
 
         if page_data['filter_external'] is None:
             params.pop('router:external', None)
@@ -1369,12 +1447,33 @@ def _query_shared_nets(request, page_data, **params):
         # Grab only all shared networks
         # May include shared external nets based on external filter
         params['shared'] = True
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            params['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
+        params.update(_tags_any_param(tags))
 
         return _perform_net_query(request, {}, page_data, 'shr', **params)
 
     return []
+
+
+def _query_classic_net(request, page_data, purpose=None):
+    """Nectar: the classic placeholder network, offered first.
+
+    Nova replaces it with a real provider network at boot, so it is a
+    real (subnet-less) neutron network that must lead the first page of
+    every listing a user may pick a network from. It is not re-added when
+    the first page is reached through "prev", and a page boundary landing
+    on it paginates the shared query from its id. Both are acceptable.
+    """
+    classic_id = nectar_classic_network_id()
+    if (not classic_id or purpose == PURPOSE_ROUTER or
+            page_data.get('marker_id') is not None or
+            page_data['filter_shared'] is False or
+            page_data['filter_external'] is True):
+        return []
+    try:
+        return [network_get(request, classic_id)]
+    except Exception:
+        LOG.warning('Unable to retrieve the classic network %s', classic_id)
+        return []
 
 
 def _query_project_nets(request, tenant_id, page_data, **params):
@@ -1393,13 +1492,8 @@ def _query_project_nets(request, tenant_id, page_data, **params):
             params['router:external'] = page_data['filter_external']
         params['shared'] = False
 
-        networks = _perform_net_query(
+        return _perform_net_query(
             request, {'tenant_id': tenant_id}, page_data, 'proj', **params)
-        if settings.NECTAR_FLOATING_NETWORK_TAG and page_data.get(
-                'marker_id') is None:
-            networks = network_list(
-                request, id='00000000-0000-0000-0000-000000000000') + networks
-        return networks
 
     return []
 
@@ -1418,7 +1512,7 @@ def _perform_net_query(
 
 
 def _query_nets_for_tenant(request, include_external, tenant_id, page_data,
-                           **params):
+                           purpose=None, **params):
 
     # Save variables
     page_data['filter_external'] = params.get('router:external')
@@ -1442,14 +1536,18 @@ def _query_nets_for_tenant(request, include_external, tenant_id, page_data,
             return update_pagination(nets, page_data)
 
         shr_nets = _query_shared_nets(
-            request, page_data, **params)
+            request, page_data, purpose=purpose, **params)
         if _add_to_nets_and_return(nets, shr_nets, page_data):
             return update_pagination(nets, page_data)
 
     # normal direction (for next page)
     else:
+        classic_nets = _query_classic_net(request, page_data, purpose)
+        if _add_to_nets_and_return(nets, classic_nets, page_data):
+            return update_pagination(nets, page_data)
+
         shr_nets = _query_shared_nets(
-            request, page_data, **params)
+            request, page_data, purpose=purpose, **params)
         if _add_to_nets_and_return(nets, shr_nets, page_data):
             return update_pagination(nets, page_data)
 
@@ -1590,7 +1688,7 @@ def _perform_query(
 @profiler.trace
 def network_list_for_tenant(request, tenant_id, include_external=False,
                             include_pre_auto_allocate=False, page_data=None,
-                            **params):
+                            purpose=None, **params):
     """Return a network list available for the tenant.
 
     The list contains networks owned by the tenant and public networks.
@@ -1603,6 +1701,9 @@ def network_list_for_tenant(request, tenant_id, include_external=False,
         'sort_dir': '<desc(next)|asc(prev)>'
     }
 
+    Nectar: ``purpose`` (None, PURPOSE_BOOT or PURPOSE_ROUTER) selects
+    which shared networks are offered and whether the classic network
+    leads the list. See the notes next to PURPOSE_BOOT.
     """
 
     # Pagination is implemented consistently with nova and cinder views,
@@ -1641,6 +1742,7 @@ def network_list_for_tenant(request, tenant_id, include_external=False,
         'include_external': include_external,
         'tenant_id': tenant_id,
         'page_data': page_data,
+        'purpose': purpose,
         **params,
     }
 
@@ -1712,11 +1814,27 @@ def network_delete(request, network_id):
 @memoized
 def subnet_list(request, **params):
     LOG.debug("subnet_list(): params=%s", params)
-    if settings.NECTAR_FLOATING_NETWORK_TAG and 'tenant_id' not in params:
-        params['tenant_id'] = request.user.tenant_id
     subnets = networkclient(request).subnets(**params)
     ret_val = [Subnet(s.to_dict()) for s in subnets]
     return ret_val
+
+
+@profiler.trace
+def subnet_list_for_tenant(request, tenant_id):
+    """Return the subnets a project user may create ports on.
+
+    Plugin wizards (octavia-dashboard picks load balancer VIP and member
+    subnets from it) list subnets without a filter, which returns every
+    subnet the user can see. Nectar: restrict that to the subnets of the
+    networks the user may boot on, so floating and hidden provider
+    networks are left out. Upstream behaviour when Nectar tagging is
+    not configured.
+    """
+    if _nectar_shared_tags(PURPOSE_BOOT) is None:
+        return subnet_list(request)
+    networks = network_list_for_tenant(request, tenant_id,
+                                       purpose=PURPOSE_BOOT)
+    return [subnet for network in networks for subnet in network['subnets']]
 
 
 @profiler.trace

@@ -97,11 +97,8 @@ def network_field_data(request, include_empty_option=False, with_cidr=False,
         extra_params = {}
         if for_launch:
             extra_params['include_pre_auto_allocate'] = True
-            # Nectarism: our shared networks are provider and floating
-            # networks, not somewhere to boot a server, and neutron
-            # returns them ahead of the default network. Same filter the
-            # launch instance REST endpoint passes.
-            extra_params['shared'] = False
+            # Nectar: only networks an instance may boot on, classic first.
+            extra_params['purpose'] = api.neutron.PURPOSE_BOOT
         try:
             networks = api.neutron.network_list_for_tenant(
                 request, tenant_id, **extra_params)
@@ -109,10 +106,11 @@ def network_field_data(request, include_empty_option=False, with_cidr=False,
             msg = _('Failed to get network list.')
             exceptions.handle(request, msg)
 
+        # Nectar: the classic network has no subnets but is bootable.
+        classic_id = api.neutron.nectar_classic_network_id()
         _networks = []
         for n in networks:
-            if not n['subnet_ids'] and \
-               n['id'] != '00000000-0000-0000-0000-000000000000':
+            if not n['subnet_ids'] and n['id'] != classic_id:
                 continue
             v = n.name_or_id
             if with_cidr:

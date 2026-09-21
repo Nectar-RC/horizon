@@ -42,7 +42,7 @@ class NeutronNetworksTestCase(test.RestAPITestCase):
         mock_network_list_for_tenant.assert_called_once_with(
             request, request.user.tenant_id,
             include_pre_auto_allocate=True,
-            shared=False)
+            purpose=api.neutron.PURPOSE_BOOT)
 
     def test_create(self):
         self._test_create(
@@ -122,6 +122,17 @@ class NeutronSubnetsTestCase(test.RestAPITestCase):
         self.assertStatusCode(response, 200)
         mock_subnet_list.assert_called_once_with(
             request, network_id=network_id)
+
+    @mock.patch.object(api.neutron, 'subnet_list_for_tenant')
+    def test_get_unfiltered_lists_for_tenant(self,
+                                             mock_subnet_list_for_tenant):
+        # Nectar: plugin wizards list subnets without a filter
+        request = self.mock_rest_request(GET=django_request.QueryDict(''))
+        mock_subnet_list_for_tenant.return_value = self.subnets.list()
+        response = neutron.Subnets().get(request)
+        self.assertStatusCode(response, 200)
+        mock_subnet_list_for_tenant.assert_called_once_with(
+            request, request.user.tenant_id)
 
     @mock.patch.object(api.neutron, 'subnet_create')
     def test_create(self, mock_subnet_create):
