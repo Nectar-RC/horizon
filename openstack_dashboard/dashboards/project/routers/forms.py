@@ -18,7 +18,6 @@ Views for managing Neutron Routers.
 """
 import logging
 
-from django.conf import settings
 from django.urls import reverse
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
@@ -103,11 +102,8 @@ class CreateForm(forms.SelfHandlingForm):
             del self.fields['az_hints']
 
     def _get_network_list(self, request):
-        search_opts = {'router:external': True}
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            search_opts['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
         try:
-            networks = api.neutron.network_list(request, **search_opts)
+            networks = api.neutron.floating_network_list(request)
         except Exception as e:
             LOG.info('Failed to get network list: %s', e)
             msg = _('Failed to get network list.')

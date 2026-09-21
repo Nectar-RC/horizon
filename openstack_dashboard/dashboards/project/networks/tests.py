@@ -16,6 +16,7 @@ import collections
 from unittest import mock
 from urllib import parse
 
+from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils.html import escape
 
@@ -136,6 +137,52 @@ class NetworkStubMixin(object):
 
     def _check_is_extension_supported(self, expected_count):
         self.assertEqual(expected_count, self._feature_call_counts)
+
+
+CLASSIC_NETWORK_ID = '00000000-0000-0000-0000-000000000000'
+
+
+@override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating',
+                   NECTAR_BOOTABLE_NETWORK_TAG='nectar:bootable',
+                   NECTAR_CLASSIC_NETWORK_ID=CLASSIC_NETWORK_ID)
+class NectarNetworkTests(test.TestCase, NetworkStubMixin):
+
+    @test.create_mocks({api.neutron: ('network_list',
+                                      'network_get',
+                                      'is_extension_supported'),
+                        quotas: ('tenant_quota_usages',)})
+    def test_index_classic_first_and_tagged_queries(self):
+        quota_data = self.neutron_quota_usages.first()
+        quota_data['network']['available'] = 5
+        quota_data['subnet']['available'] = 5
+        self._stub_net_list()
+        classic = api.neutron.Network(dict(
+            self.networks.first().to_dict(), id=CLASSIC_NETWORK_ID,
+            name='Classic Provider', tenant_id='admin',
+            shared=True, is_shared=True, subnets=[], subnet_ids=[]))
+        self.mock_network_get.return_value = classic
+        self.mock_tenant_quota_usages.return_value = quota_data
+        self.mock_is_extension_supported.return_value = True
+
+        res = self.client.get(INDEX_URL)
+
+        self.assertTemplateUsed(res, INDEX_TEMPLATE)
+        networks = res.context['networks_table'].data
+        self.assertEqual(CLASSIC_NETWORK_ID, networks[0].id)
+        self.mock_network_get.assert_called_once_with(
+            test.IsHttpRequest(), CLASSIC_NETWORK_ID)
+        self.mock_network_list.assert_has_calls([
+            mock.call(test.IsHttpRequest(), single_page=True, limit=21,
+                      sort_dir='asc', sort_key='id', shared=True,
+                      **{'tags-any': 'nectar:floating,nectar:bootable'}),
+            mock.call(test.IsHttpRequest(), single_page=True, limit=21,
+                      sort_dir='asc', sort_key='id',
+                      shared=False, tenant_id=self.tenant.id),
+            mock.call(test.IsHttpRequest(), single_page=True, limit=21,
+                      sort_dir='asc', sort_key='id',
+                      **{'router:external': True,
+                         'tags-any': 'nectar:floating'}, shared=False),
+        ])
 
 
 class NetworkTests(test.TestCase, NetworkStubMixin):

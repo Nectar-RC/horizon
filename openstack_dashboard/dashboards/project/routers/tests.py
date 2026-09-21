@@ -15,6 +15,7 @@
 import copy
 from unittest import mock
 
+from django.test.utils import override_settings
 from django.urls import reverse
 
 from openstack_dashboard import api
@@ -341,6 +342,31 @@ class RouterActionTests(test.TestCase):
             test.IsHttpRequest(),
             name=router.name,
             admin_state_up=router.admin_state_up)
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    @test.create_mocks({api.neutron: ('router_create',
+                                      'get_feature_permission',
+                                      'network_list',
+                                      'is_extension_supported')})
+    def test_router_create_post_nectar_floating_tag(self):
+        router = self.routers.first()
+
+        self.mock_get_feature_permission.return_value = False
+        self.mock_network_list.return_value = self.networks.list()
+        self.mock_is_extension_supported.return_value = False
+        self.mock_router_create.return_value = router
+
+        form_data = {'name': router.name,
+                     'admin_state_up': router.admin_state_up}
+        url = reverse('horizon:%s:routers:create' % self.DASHBOARD)
+        res = self.client.post(url, form_data)
+
+        self.assertNoFormErrors(res)
+        self.assertRedirectsNoFollow(res, self.INDEX_URL)
+        # Nectar: only floating networks are offered as gateways
+        self.mock_network_list.assert_called_once_with(
+            test.IsHttpRequest(),
+            **{'router:external': True, 'tags-any': 'nectar:floating'})
 
     @test.create_mocks({api.neutron: ('router_create',
                                       'get_feature_permission',
@@ -843,6 +869,42 @@ class RouterActionTests(test.TestCase):
     def test_router_addinterface(self):
         self._test_router_addinterface()
 
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    @test.create_mocks({api.neutron: ('router_get',
+                                      'router_add_interface',
+                                      'port_get',
+                                      'network_list',
+                                      'port_list')})
+    def test_router_addinterface_nectar_project_networks_only(self):
+        router = self.routers.first()
+        subnet = self.subnets.first()
+        port = self.ports.first()
+
+        self.mock_router_add_interface.return_value = {
+            'subnet_id': subnet.id,
+            'port_id': port.id
+        }
+        self.mock_port_get.return_value = port
+        self.mock_router_get.return_value = router
+        self.mock_port_list.return_value = []
+        self.mock_network_list.return_value = self.networks.list()
+
+        form_data = {'router_id': router.id,
+                     'router_name': router.name,
+                     'subnet_id': subnet.id,
+                     'ip_address': ''}
+        url = reverse('horizon:%s:routers:addinterface' % self.DASHBOARD,
+                      args=[router.id])
+        res = self.client.post(url, form_data)
+
+        self.assertNoFormErrors(res)
+        self.assertRedirectsNoFollow(
+            res, reverse(self.DETAIL_PATH, args=[router.id]))
+        # Nectar: shared networks never get router interfaces
+        self.mock_network_list.assert_called_once_with(
+            test.IsHttpRequest(), single_page=False,
+            shared=False, tenant_id=router['tenant_id'])
+
     @test.create_mocks({api.neutron: ('router_get',
                                       'router_add_interface',
                                       'network_list',
@@ -999,6 +1061,37 @@ class RouterActionTests(test.TestCase):
             test.IsHttpRequest(), 'ext-gw-mode')
         self.mock_get_feature_permission.assert_called_once_with(
             test.IsHttpRequest(), 'ext-gw-mode', 'update_router_enable_snat')
+
+    @override_settings(NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    @test.create_mocks({api.neutron: ('router_get',
+                                      'router_add_gateway',
+                                      'network_list',
+                                      'is_extension_supported',
+                                      'get_feature_permission')})
+    def test_router_add_gateway_nectar_floating_tag(self):
+        router = self.routers.first()
+        network = self.networks.first()
+
+        self.mock_router_add_gateway.return_value = None
+        self.mock_router_get.return_value = router
+        self.mock_network_list.return_value = [network]
+        self.mock_is_extension_supported.return_value = True
+        self.mock_get_feature_permission.return_value = True
+
+        form_data = {'router_id': router.id,
+                     'router_name': router.name,
+                     'network_id': network.id,
+                     'enable_snat': True}
+        url = reverse('horizon:%s:routers:setgateway' % self.DASHBOARD,
+                      args=[router.id])
+        res = self.client.post(url, form_data)
+
+        self.assertNoFormErrors(res)
+        self.assertRedirectsNoFollow(res, self.INDEX_URL)
+        # Nectar: only floating networks are offered as gateways
+        self.mock_network_list.assert_called_once_with(
+            test.IsHttpRequest(),
+            **{'router:external': True, 'tags-any': 'nectar:floating'})
 
     @test.create_mocks({api.neutron: ('router_get',
                                       'router_add_gateway',

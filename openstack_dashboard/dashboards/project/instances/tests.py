@@ -2826,6 +2826,55 @@ class NetworkFieldDataTests(helpers.APITestCase):
         self.mock_network_list_for_tenant.assert_called_once_with(
             self.request, self.request.user.tenant_id)
 
+    @helpers.create_mocks({api.neutron: ('network_list_for_tenant',)})
+    def test_for_attach_asks_for_bootable_networks(self):
+        self.mock_network_list_for_tenant.return_value = []
+
+        instance_utils.network_field_data(self.request, for_attach=True)
+
+        self.mock_network_list_for_tenant.assert_called_once_with(
+            self.request, self.request.user.tenant_id,
+            purpose=api.neutron.PURPOSE_BOOT)
+
+    @override_settings(NECTAR_CLASSIC_NETWORK_ID='classic')
+    @helpers.create_mocks({api.neutron: ('network_list_for_tenant',)})
+    def test_classic_first_then_sorted_with_empty_option(self):
+        # Nectar: the classic network has no subnets yet leads the list,
+        # any other subnet-less network is skipped.
+        subnet = api.neutron.Subnet({'id': 'subnet', 'cidr': '10.0.0.0/24',
+                                     'ip_version': 4})
+
+        def net(net_id, name, subnets):
+            return api.neutron.Network({
+                'id': net_id, 'name': name, 'subnets': subnets,
+                'subnet_ids': [s.id for s in subnets]})
+
+        self.mock_network_list_for_tenant.return_value = [
+            net('b', 'bravo', [subnet]),
+            net('classic', 'Classic Provider', []),
+            net('a', 'alpha', [subnet]),
+            net('empty', 'no subnets', []),
+        ]
+
+        choices = instance_utils.network_field_data(
+            self.request, include_empty_option=True, with_cidr=True)
+
+        self.assertEqual([
+            ('', 'Select Network'),
+            ('classic', 'Classic Provider'),
+            ('a', 'alpha (10.0.0.0/24)'),
+            ('b', 'bravo (10.0.0.0/24)'),
+        ], choices)
+
+    @helpers.create_mocks({api.neutron: ('network_list_for_tenant',)})
+    def test_no_networks_with_empty_option(self):
+        self.mock_network_list_for_tenant.return_value = []
+
+        choices = instance_utils.network_field_data(
+            self.request, include_empty_option=True)
+
+        self.assertEqual([('', 'No networks available')], choices)
+
 
 class InstanceAjaxTests(helpers.TestCase):
     @helpers.create_mocks({api.nova: ("server_get",
@@ -3123,9 +3172,12 @@ class ConsoleManagerTests(helpers.ResetImageAPIVersionMixin, helpers.TestCase):
                'net_name': net1.name_or_id}
         )
         self.assertContains(res, expected_label)
+        self.assertContains(res, 'Select Network')
         self.mock_network_list_for_tenant.assert_has_calls([
-            mock.call(helpers.IsHttpRequest(), self.tenant.id),
-            mock.call(helpers.IsHttpRequest(), self.tenant.id),
+            mock.call(helpers.IsHttpRequest(), self.tenant.id,
+                      purpose=api.neutron.PURPOSE_BOOT),
+            mock.call(helpers.IsHttpRequest(), self.tenant.id,
+                      purpose=api.neutron.PURPOSE_BOOT),
         ])
         self.assertEqual(2, self.mock_network_list_for_tenant.call_count)
         self.mock_port_list_with_trunk_types.assert_called_once_with(
@@ -3168,8 +3220,10 @@ class ConsoleManagerTests(helpers.ResetImageAPIVersionMixin, helpers.TestCase):
         self.assertRedirectsNoFollow(res, INDEX_URL)
 
         self.mock_network_list_for_tenant.assert_has_calls([
-            mock.call(helpers.IsHttpRequest(), self.tenant.id),
-            mock.call(helpers.IsHttpRequest(), self.tenant.id),
+            mock.call(helpers.IsHttpRequest(), self.tenant.id,
+                      purpose=api.neutron.PURPOSE_BOOT),
+            mock.call(helpers.IsHttpRequest(), self.tenant.id,
+                      purpose=api.neutron.PURPOSE_BOOT),
         ])
         self.assertEqual(2, self.mock_network_list_for_tenant.call_count)
         self.mock_port_list_with_trunk_types.assert_called_once_with(

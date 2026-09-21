@@ -12,6 +12,7 @@
 
 from collections import namedtuple
 import logging
+from operator import itemgetter
 
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
@@ -79,7 +80,7 @@ def server_group_list(request):
 
 
 def network_field_data(request, include_empty_option=False, with_cidr=False,
-                       for_launch=False):
+                       for_launch=False, for_attach=False):
     """Returns a list of tuples of all networks.
 
     Generates a list of networks available to the user (request). And returns
@@ -89,6 +90,8 @@ def network_field_data(request, include_empty_option=False, with_cidr=False,
     :param include_empty_option: flag to include a empty tuple in the front of
          the list
     :param with_cidr: flag to include subnets cidr in field name
+    :param for_launch: only networks an instance may be launched on
+    :param for_attach: only networks an interface may be attached on
     :return: list of (id, name) tuples
     """
     tenant_id = request.user.tenant_id
@@ -97,6 +100,7 @@ def network_field_data(request, include_empty_option=False, with_cidr=False,
         extra_params = {}
         if for_launch:
             extra_params['include_pre_auto_allocate'] = True
+        if for_launch or for_attach:
             # Nectar: only networks an instance may boot on, classic first.
             extra_params['purpose'] = api.neutron.PURPOSE_BOOT
         try:
@@ -118,10 +122,14 @@ def network_field_data(request, include_empty_option=False, with_cidr=False,
                           if subnet.ip_version == 4] +
                          [subnet.cidr for subnet in n['subnets']
                           if subnet.ip_version == 6])
-                v += ' (%s)' % ', '.join(cidrs)
+                if cidrs:
+                    v += ' (%s)' % ', '.join(cidrs)
             _networks.append((n.id, v))
-
-        return _networks
+        # Nectar: the classic network leads, the rest is sorted by name.
+        # Plugins such as trove-dashboard default to the first choice.
+        classic = [n for n in _networks if n[0] == classic_id]
+        others = [n for n in _networks if n[0] != classic_id]
+        networks = classic + sorted(others, key=itemgetter(1))
 
     if not networks:
         if include_empty_option:
@@ -206,8 +214,10 @@ def port_field_data(request, with_network=False):
 
     ports = []
     if api.base.is_service_enabled(request, 'network'):
+        # Nectar: only ports on networks an instance may attach to
         network_list = api.neutron.network_list_for_tenant(
-            request, request.user.tenant_id)
+            request, request.user.tenant_id,
+            purpose=api.neutron.PURPOSE_BOOT)
         network_dict = dict((n.id, n) for n in network_list)
         ports = [
             (port.id,

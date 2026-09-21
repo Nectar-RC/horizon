@@ -330,7 +330,8 @@ class AttachInterface(forms.SelfHandlingForm):
         super().__init__(request, *args, **kwargs)
         networks = instance_utils.network_field_data(request,
                                                      include_empty_option=True,
-                                                     with_cidr=True)
+                                                     with_cidr=True,
+                                                     for_attach=True)
         self.fields['network'].choices = networks
 
         choices = [('network', _("by Network (and IP address)"))]

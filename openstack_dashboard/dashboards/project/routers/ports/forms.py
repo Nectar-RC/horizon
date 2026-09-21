@@ -14,7 +14,6 @@
 
 import logging
 
-from django.conf import settings
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
@@ -48,7 +47,9 @@ class AddInterface(forms.SelfHandlingForm):
         router_id = self.initial['router_id']
 
         try:
-            networks = api.neutron.network_list_for_tenant(request, tenant_id)
+            # Nectar: only the project's own networks get router interfaces
+            networks = api.neutron.network_list_for_tenant(
+                request, tenant_id, purpose=api.neutron.PURPOSE_ROUTER)
             if router_id:
                 ports = api.neutron.port_list(request, device_id=router_id)
                 router_subnet_ids = [fixed_ip["subnet_id"] for port in ports
@@ -166,12 +167,8 @@ class SetGatewayForm(forms.SelfHandlingForm):
             del self.fields['enable_snat']
 
     def populate_network_id_choices(self, request):
-        search_opts = {'router:external': True}
-        if settings.NECTAR_FLOATING_NETWORK_TAG:
-            search_opts['tags-any'] = settings.NECTAR_FLOATING_NETWORK_TAG
-
         try:
-            networks = api.neutron.network_list(request, **search_opts)
+            networks = api.neutron.floating_network_list(request)
         except Exception as e:
             LOG.info('Failed to get network list: %s', e)
             msg = _('Failed to get network list.')

@@ -292,9 +292,8 @@ class JSONView(View):
         # Add public networks to the networks list
         if self.is_router_enabled:
             try:
-                neutron_public_networks = api.neutron.network_list(
-                    request,
-                    **{'router:external': True})
+                neutron_public_networks = api.neutron.floating_network_list(
+                    request)
             except Exception:
                 neutron_public_networks = []
             my_network_ids = [net['id'] for net in networks]

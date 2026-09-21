@@ -56,7 +56,20 @@ class NetworkTopologyTests(test.TestCase):
     def test_json_view_console_disabled(self):
         self._test_json_view(with_console=False)
 
-    def _test_json_view(self, router_enable=True, with_console=True):
+    @django.test.utils.override_settings(
+        NECTAR_FLOATING_NETWORK_TAG='nectar:floating')
+    @test.create_mocks({api.nova: ('server_list',),
+                        api.neutron: ('network_list_for_tenant',
+                                      'network_list',
+                                      'router_list',
+                                      'port_list')})
+    def test_json_view_nectar_floating_tag(self):
+        # Nectar: only floating networks are drawn as public networks
+        self._test_json_view(external_call_kwargs={
+            'router:external': True, 'tags-any': 'nectar:floating'})
+
+    def _test_json_view(self, router_enable=True, with_console=True,
+                        external_call_kwargs=None):
         self.mock_server_list.return_value = [self.servers.list(), False]
 
         tenant_networks = [net for net in self.networks.list()
@@ -180,7 +193,8 @@ class NetworkTopologyTests(test.TestCase):
             self.mock_router_list.assert_called_once_with(
                 test.IsHttpRequest(), tenant_id=self.tenant.id)
             self.mock_network_list.assert_called_once_with(
-                test.IsHttpRequest(), **{'router:external': True})
+                test.IsHttpRequest(),
+                **(external_call_kwargs or {'router:external': True}))
         self.mock_port_list.assert_called_once_with(
             test.IsHttpRequest())
 
