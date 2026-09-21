@@ -506,17 +506,31 @@
     // Networks
 
     function getNetworks() {
-      return neutronAPI.getNetworks().then(onGetNetworks, noop).then(getPorts, noop);
+      // Nectar: the classic network has no subnets yet is bootable, and it
+      // is the default choice when offered.
+      return $q.all([
+        neutronAPI.getNetworks(),
+        settings.getSetting('NECTAR_CLASSIC_NETWORK_ID').catch(noop)
+      ]).then(onGetNetworks, noop).then(getPorts, noop);
     }
 
-    function onGetNetworks(data) {
+    function onGetNetworks(results) {
+      var data = results[0];
+      var classicId = results[1];
       model.neutronEnabled = true;
       model.networks.length = 0;
       push.apply(model.networks,
         data.data.items.filter(function(net) {
-          return net.subnets.length > -1;
+          return net.subnets.length > 0 || net.id === classicId;
         }));
-      model.newInstanceSpec.networks.push(model.networks[0]);
+      var classic = model.networks.filter(function(net) {
+        return net.id === classicId;
+      })[0];
+      if (classic) {
+        model.newInstanceSpec.networks.push(classic);
+      } else if (model.networks.length === 1) {
+        model.newInstanceSpec.networks.push(model.networks[0]);
+      }
       return data;
     }
 

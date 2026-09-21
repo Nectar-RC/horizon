@@ -640,6 +640,25 @@
           expect(model.newInstanceSpec.networks).toEqual(networks);
         });
 
+        it('should not set a network by default if several are available', function () {
+          neutronEnabled = true;
+          model.initialize(true);
+          scope.$apply();
+          expect(model.networks.length).toBe(2);
+          expect(model.newInstanceSpec.networks.length).toBe(0);
+        });
+
+        it('should keep the subnet-less classic network and select it', function () {
+          // Nectar: NECTAR_CLASSIC_NETWORK_ID names the default network
+          settings.NECTAR_CLASSIC_NETWORK_ID = 'net-3';
+          neutronEnabled = true;
+          model.initialize(true);
+          scope.$apply();
+          expect(model.networks.length).toBe(3);
+          expect(model.newInstanceSpec.networks.length).toBe(1);
+          expect(model.newInstanceSpec.networks[0].id).toBe('net-3');
+        });
+
         it('getPorts at launch should not return child port', function () {
           var ports = [ { id: 'parent',
                           trunk_details:  { trunk_id: 'trunk1',
